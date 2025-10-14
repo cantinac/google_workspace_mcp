@@ -173,6 +173,37 @@ async def _authenticate_service(
     Returns:
         Tuple of (service, actual_user_email)
     """
+    # Check for bearer token mode (external token authentication)
+    import os
+    if os.getenv('MCP_BEARER_TOKEN_MODE') == '1':
+        logger.info(f"[{tool_name}] Using bearer token mode (external authentication)")
+        from auth.external_token_provider import get_credentials_from_env
+        
+        credentials = get_credentials_from_env(validate=False)  # Validate on first use, not every call
+        if not credentials:
+            raise GoogleAuthenticationError(
+                "Bearer token mode enabled but no valid token found",
+                auth_url=None,
+                required_scopes=resolved_scopes
+            )
+        
+        # Build service with external credentials
+        service = build(service_name, service_version, credentials=credentials)
+        
+        # Get user email from token if not provided
+        actual_email = user_google_email
+        if not actual_email or actual_email == "me":
+            try:
+                userinfo_service = build('oauth2', 'v2', credentials=credentials)
+                user_info = userinfo_service.userinfo().get().execute()
+                actual_email = user_info.get('email', 'unknown')
+                logger.debug(f"[{tool_name}] Bearer token user email: {actual_email}")
+            except Exception as e:
+                logger.warning(f"[{tool_name}] Could not get user email from bearer token: {e}")
+                actual_email = "bearer-token-user"
+        
+        return service, actual_email
+    
     if use_oauth21:
         logger.debug(f"[{tool_name}] Using OAuth 2.1 flow")
         return await get_authenticated_google_service_oauth21(

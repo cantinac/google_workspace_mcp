@@ -82,6 +82,10 @@ def main():
                         help='Load tools based on tier level. Can be combined with --tools to filter services.')
     parser.add_argument('--transport', choices=['stdio', 'streamable-http'], default='stdio',
                         help='Transport mode: stdio (default) or streamable-http')
+    parser.add_argument('--bearer-token-mode', action='store_true',
+                        help='Use external bearer token authentication (bypasses OAuth 2.1 flow)')
+    parser.add_argument('--bearer-token', type=str, default=None,
+                        help='Bearer token for authentication (or use GOOGLE_BEARER_TOKEN env var)')
     args = parser.parse_args()
 
     # Set port and base URI once for reuse throughout the function
@@ -105,6 +109,27 @@ def main():
     safe_print(f"   👤 Mode: {'Single-user' if args.single_user else 'Multi-user'}")
     safe_print(f"   🐍 Python: {sys.version.split()[0]}")
     safe_print("")
+    
+    # Bearer token mode configuration
+    if args.bearer_token_mode:
+        bearer_token = args.bearer_token or os.getenv('GOOGLE_BEARER_TOKEN')
+        if not bearer_token:
+            safe_print("❌ Bearer token mode enabled but no token provided")
+            safe_print("   Provide token via --bearer-token or GOOGLE_BEARER_TOKEN environment variable")
+            sys.exit(1)
+        
+        # Set environment variable for bearer token mode
+        os.environ['GOOGLE_BEARER_TOKEN'] = bearer_token
+        os.environ['MCP_BEARER_TOKEN_MODE'] = '1'
+        safe_print("🔐 Authentication Mode: Bearer Token (External)")
+        safe_print("   ✅ Bearer token provided and will be validated on first API call")
+        safe_print("")
+    elif args.transport == 'streamable-http' and is_stateless_mode():
+        safe_print("🔐 Authentication Mode: OAuth 2.1 (Stateless)")
+        safe_print("")
+    else:
+        safe_print("🔐 Authentication Mode: Google OAuth (Standard)")
+        safe_print("")
 
     # Active Configuration
     safe_print("⚙️ Active Configuration:")
