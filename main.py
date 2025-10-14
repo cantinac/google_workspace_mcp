@@ -588,6 +588,17 @@ def main():
             "Mutually exclusive with --read-only and --tools."
         ),
     )
+    parser.add_argument(
+        "--bearer-token-mode",
+        action="store_true",
+        help="Use external bearer token authentication (bypasses OAuth 2.1 flow)",
+    )
+    parser.add_argument(
+        "--bearer-token",
+        type=str,
+        default=None,
+        help="Bearer token for authentication (or use GOOGLE_BEARER_TOKEN env var)",
+    )
     args = parser.parse_args()
 
     # Validate the memory-safety settings once at startup. Tool helpers parse them
@@ -733,6 +744,15 @@ def main():
         version = metadata.version("workspace-mcp")
     except metadata.PackageNotFoundError:
         version = "dev"
+    # Bearer token mode configuration
+    if args.bearer_token_mode:
+        bearer_token = args.bearer_token or os.getenv("GOOGLE_BEARER_TOKEN")
+        if not bearer_token:
+            safe_print("Bearer token mode enabled but no token provided")
+            safe_print("   Provide token via --bearer-token or GOOGLE_BEARER_TOKEN environment variable")
+            sys.exit(1)
+        os.environ["GOOGLE_BEARER_TOKEN"] = bearer_token
+        os.environ["MCP_BEARER_TOKEN_MODE"] = "1"
 
     mode = "single-user" if args.single_user else "multi-user"
     pyver = sys.version.split()[0]
