@@ -175,7 +175,11 @@ async def _authenticate_service(
     """
     # Check for bearer token mode (external token authentication)
     import os
-    if os.getenv('MCP_BEARER_TOKEN_MODE') == '1':
+    bearer_mode = os.getenv('MCP_BEARER_TOKEN_MODE')
+    bearer_token = os.getenv('GOOGLE_BEARER_TOKEN')
+    logger.info(f"[{tool_name}] 🔍 Auth check: MCP_BEARER_TOKEN_MODE={bearer_mode}, has_token={bool(bearer_token)}, token_length={len(bearer_token) if bearer_token else 0}")
+    
+    if bearer_mode == '1':
         logger.info(f"[{tool_name}] Using bearer token mode (external authentication)")
         from auth.external_token_provider import get_credentials_from_env
         
