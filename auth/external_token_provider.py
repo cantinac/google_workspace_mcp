@@ -150,13 +150,20 @@ class ExternalTokenProvider:
         Returns:
             Google OAuth 2.0 Credentials object
         """
+        from datetime import datetime, timedelta
+        
+        # Set expiry far in the future since external service handles refresh
+        # This prevents Google auth library from trying to refresh the token
+        expiry = datetime.utcnow() + timedelta(hours=24)
+        
         return Credentials(
             token=self.access_token,
             refresh_token=None,  # External service handles refresh
             token_uri=None,
             client_id=None,
             client_secret=None,
-            scopes=self.scopes
+            scopes=self.scopes,
+            expiry=expiry  # Set expiry to prevent auto-refresh attempts
         )
     
     def get_credentials(self) -> Credentials:
@@ -172,36 +179,47 @@ class ExternalTokenProvider:
         """
         Validate token works with Google APIs.
         
-        Makes a lightweight API call (userinfo) to verify the token
-        is valid and can authenticate with Google services.
+        Uses the tokeninfo endpoint which doesn't require People API to be enabled.
+        This is more reliable for server-side OAuth integrations.
         
         Returns:
             True if token is valid and can make API calls, False otherwise
         """
         try:
-            # Test with userinfo API (lightweight validation)
-            service = build('oauth2', 'v2', credentials=self.credentials)
-            self.user_info = service.userinfo().get().execute()
+            # Use tokeninfo endpoint (doesn't require People API)
+            import requests
+            response = requests.get(
+                f"https://www.googleapis.com/oauth2/v3/tokeninfo?access_token={self.access_token}",
+                timeout=5
+            )
             
-            logger.info(
-                "Bearer token validated successfully",
-                extra={
-                    "user_email": self.user_info.get('email'),
-                    "user_id": self.user_info.get('id')
+            if response.status_code == 200:
+                token_info = response.json()
+                # Store basic user info from token validation
+                self.user_info = {
+                    'email': token_info.get('email', 'unknown'),
+                    'id': token_info.get('sub', 'unknown')
                 }
-            )
-            return True
+                
+                logger.info(
+                    "Bearer token validated successfully",
+                    extra={
+                        "user_email": self.user_info.get('email'),
+                        "expires_in": token_info.get('expires_in'),
+                        "scope_count": len(token_info.get('scope', '').split())
+                    }
+                )
+                return True
+            else:
+                logger.error(
+                    "Bearer token validation failed - HTTP error",
+                    extra={
+                        "status_code": response.status_code,
+                        "error": response.text[:200]
+                    }
+                )
+                return False
             
-        except HttpError as e:
-            logger.error(
-                "Bearer token validation failed - HTTP error",
-                extra={
-                    "status_code": e.status_code,
-                    "error": str(e)
-                },
-                exc_info=True
-            )
-            return False
         except Exception as e:
             logger.error(
                 "Bearer token validation failed",
@@ -218,14 +236,28 @@ class ExternalTokenProvider:
         Get user info for the authenticated token.
         
         Returns:
-            User info dict with email, name, id, etc.
+            User info dict with email, id, etc.
             
         Raises:
-            Exception: If userinfo API call fails
+            Exception: If tokeninfo API call fails
         """
         if not self.user_info:
-            service = build('oauth2', 'v2', credentials=self.credentials)
-            self.user_info = service.userinfo().get().execute()
+            # Use tokeninfo endpoint (doesn't require People API)
+            import requests
+            response = requests.get(
+                f"https://www.googleapis.com/oauth2/v3/tokeninfo?access_token={self.access_token}",
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                token_info = response.json()
+                self.user_info = {
+                    'email': token_info.get('email', 'unknown'),
+                    'id': token_info.get('sub', 'unknown')
+                }
+            else:
+                raise Exception(f"Failed to get user info: HTTP {response.status_code}")
+                
         return self.user_info
     
     def __repr__(self) -> str:
