@@ -278,11 +278,32 @@ def handle_http_errors(tool_name: str, is_read_only: bool = False, service_type:
                         ) from e
                 except HttpError as error:
                     user_google_email = kwargs.get("user_google_email", "N/A")
+                    
+                    # Extract detailed error information
                     error_details = str(error)
+                    error_content = ""
+                    try:
+                        if hasattr(error, 'content') and error.content:
+                            if isinstance(error.content, bytes):
+                                error_content = error.content.decode('utf-8', errors='ignore')
+                            else:
+                                error_content = str(error.content)
+                        elif hasattr(error, 'resp') and hasattr(error.resp, 'content'):
+                            if isinstance(error.resp.content, bytes):
+                                error_content = error.resp.content.decode('utf-8', errors='ignore')
+                            else:
+                                error_content = str(error.resp.content)
+                    except Exception:
+                        pass  # Fall back to str(error) if content extraction fails
+                    
+                    # Combine error details
+                    full_error_details = error_details
+                    if error_content and error_content not in error_details:
+                        full_error_details = f"{error_details}\nContent: {error_content}"
                     
                     # Check if this is an API not enabled error
-                    if error.resp.status == 403 and "accessNotConfigured" in error_details:
-                        enablement_msg = get_api_enablement_message(error_details, service_type)
+                    if error.resp.status == 403 and "accessNotConfigured" in full_error_details:
+                        enablement_msg = get_api_enablement_message(full_error_details, service_type)
                         
                         if enablement_msg:
                             message = (
@@ -291,22 +312,22 @@ def handle_http_errors(tool_name: str, is_read_only: bool = False, service_type:
                             )
                         else:
                             message = (
-                                f"API error in {tool_name}: {error}. "
+                                f"API error in {tool_name}: {full_error_details}. "
                                 f"The required API is not enabled for your project. "
                                 f"Please check the Google Cloud Console to enable it."
                             )
                     elif error.resp.status in [401, 403]:
                         # Authentication/authorization errors
                         message = (
-                            f"API error in {tool_name}: {error}. "
+                            f"API error in {tool_name}: {full_error_details}. "
                             f"You might need to re-authenticate for user '{user_google_email}'. "
                             f"LLM: Try 'start_google_auth' with the user's email and the appropriate service_name."
                         )
                     else:
                         # Other HTTP errors (400 Bad Request, etc.) - don't suggest re-auth
-                        message = f"API error in {tool_name}: {error}"
+                        message = f"API error in {tool_name}: {full_error_details}"
                     
-                    logger.error(f"API error in {tool_name}: {error}", exc_info=True)
+                    logger.error(f"API error in {tool_name}: {full_error_details}", exc_info=True)
                     raise Exception(message) from error
                 except TransientNetworkError:
                     # Re-raise without wrapping to preserve the specific error type
