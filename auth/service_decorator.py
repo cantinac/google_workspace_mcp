@@ -24,6 +24,10 @@ from auth.gateway_identity import (
 )
 from auth.request_identity import get_request_identity
 from core.config import USER_GOOGLE_EMAIL as _ENV_USER_EMAIL
+from auth.external_token_provider import (
+    get_bearer_token_user_email,
+    is_bearer_token_mode,
+)
 from auth.oauth21_session_store import (
     get_auth_provider,
     get_oauth21_session_store,
@@ -146,7 +150,9 @@ def _user_email_is_managed() -> bool:
     (an OAuth 2.1 access token OR a trusted-gateway assertion) instead of the caller
     passing it. Drives hiding + auto-filling the user_google_email tool parameter so
     the client never has to ask for it."""
-    return is_oauth21_enabled() or is_trust_gateway_identity()
+    return (
+        is_oauth21_enabled() or is_trust_gateway_identity() or is_bearer_token_mode()
+    )
 
 
 def _detect_oauth_version(
@@ -344,41 +350,22 @@ async def _authenticate_service(
     Returns:
         Tuple of (service, actual_user_email)
     """
-    # Check for bearer token mode (external token authentication)
-    import os
-    bearer_mode = os.getenv('MCP_BEARER_TOKEN_MODE')
-    bearer_token = os.getenv('GOOGLE_BEARER_TOKEN')
-    logger.info(f"[{tool_name}] 🔍 Auth check: MCP_BEARER_TOKEN_MODE={bearer_mode}, has_token={bool(bearer_token)}, token_length={len(bearer_token) if bearer_token else 0}")
-    
-    if bearer_mode == '1':
-        logger.info(f"[{tool_name}] Using bearer token mode (external authentication)")
+    # Bearer token mode: the externally supplied token is the credential, and
+    # user_google_email is already its account (_extract_managed_user_email).
+    if is_bearer_token_mode():
         from auth.external_token_provider import get_credentials_from_env
-        
-        credentials = get_credentials_from_env(validate=False)  # Validate on first use, not every call
+
+        # The token is validated by its first API call, not on every call here.
+        credentials = get_credentials_from_env(validate=False)
         if not credentials:
             raise GoogleAuthenticationError(
                 "Bearer token mode enabled but no valid token found",
                 auth_url=None,
-                required_scopes=resolved_scopes
             )
-        
-        # Build service with external credentials
         service = build_google_service(service_name, service_version, credentials)
-        
-        # Get user email from token if not provided
-        actual_email = user_google_email
-        if not actual_email or actual_email == "me":
-            try:
-                userinfo_service = build('oauth2', 'v2', credentials=credentials)
-                user_info = userinfo_service.userinfo().get().execute()
-                actual_email = user_info.get('email', 'unknown')
-                logger.debug(f"[{tool_name}] Bearer token user email: {actual_email}")
-            except Exception as e:
-                logger.warning(f"[{tool_name}] Could not get user email from bearer token: {e}")
-                actual_email = "bearer-token-user"
-        
-        return service, actual_email
-    
+        logger.debug(f"[{tool_name}] Authenticated {service_name} via bearer token")
+        return service, user_google_email
+
     if is_service_account_enabled():
         canonical_email = _get_configured_user_google_email()
         if not canonical_email:
@@ -566,6 +553,14 @@ def _extract_managed_user_email(
     func_name: str,
 ) -> str:
     """Resolve an email from the configured authoritative identity source."""
+    if is_bearer_token_mode():
+        # The bearer token is the identity: its account is the user.
+        try:
+            return get_bearer_token_user_email()
+        except ValueError as e:
+            raise GoogleAuthenticationError(
+                f"[{func_name}] {e}", auth_url=None
+            ) from e
     if is_trust_gateway_identity():
         return require_gateway_principal(authenticated_user, auth_method)
     return _extract_oauth21_user_email(authenticated_user, func_name)

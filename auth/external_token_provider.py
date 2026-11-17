@@ -310,3 +310,97 @@ def get_credentials_from_env(
         logger.error(f"Failed to create credentials from environment: {e}")
         return None
 
+
+
+def is_bearer_token_mode() -> bool:
+    """True when the server runs on an externally supplied bearer token (--bearer-token-mode)."""
+    import os
+
+    return os.getenv("MCP_BEARER_TOKEN_MODE") == "1"
+
+
+# The bearer token's account, looked up once per token.
+_bearer_email_cache: dict = {}
+
+
+def _email_from_tokeninfo(token: str) -> Optional[str]:
+    """The account's address from Google's tokeninfo, when the token carries an email scope."""
+    import requests
+
+    # POST keeps the token out of the request URL.
+    response = requests.post(
+        "https://www.googleapis.com/oauth2/v3/tokeninfo",
+        data={"access_token": token},
+        timeout=5,
+    )
+    if response.status_code != 200:
+        return None
+    return response.json().get("email") or None
+
+
+def _email_from_gmail(token: str) -> Optional[str]:
+    """The account's address from its Gmail profile (any Gmail scope)."""
+    import requests
+
+    response = requests.get(
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=5,
+    )
+    if response.status_code != 200:
+        return None
+    return response.json().get("emailAddress") or None
+
+
+def _email_from_drive(token: str) -> Optional[str]:
+    """The account's address from Drive's about resource (any Drive scope)."""
+    import requests
+
+    response = requests.get(
+        "https://www.googleapis.com/drive/v3/about",
+        params={"fields": "user(emailAddress)"},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=5,
+    )
+    if response.status_code != 200:
+        return None
+    return (response.json().get("user") or {}).get("emailAddress") or None
+
+
+def get_bearer_token_user_email() -> str:
+    """
+    The Google account the bearer token belongs to.
+
+    In bearer token mode the token is the identity, so tools do not take a
+    ``user_google_email`` argument: the address is read from the token
+    (tokeninfo, then the Gmail profile, then Drive's about resource, whichever
+    the token's scopes allow) and kept for the life of the process.
+
+    Raises:
+        ValueError: no token is set, or none of the lookups returned an address.
+    """
+    import os
+
+    token = os.getenv("GOOGLE_BEARER_TOKEN")
+    if not token:
+        raise ValueError("Bearer token mode is on but GOOGLE_BEARER_TOKEN is not set")
+    cached = _bearer_email_cache.get(token)
+    if cached:
+        return cached
+    failures = []
+    for lookup in (_email_from_tokeninfo, _email_from_gmail, _email_from_drive):
+        try:
+            email = lookup(token)
+        except Exception as e:  # a lookup that cannot run leaves the next one to try
+            failures.append(f"{lookup.__name__}: {type(e).__name__}")
+            logger.warning(f"Bearer token email lookup {lookup.__name__} failed: {type(e).__name__}")
+            continue
+        if email:
+            _bearer_email_cache.clear()
+            _bearer_email_cache[token] = email
+            return email
+        failures.append(f"{lookup.__name__}: no address")
+    raise ValueError(
+        "Could not determine the Google account for the bearer token "
+        f"({'; '.join(failures)}). The token may be expired or lack Gmail, Drive and email scopes."
+    )

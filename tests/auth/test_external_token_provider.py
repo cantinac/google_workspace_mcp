@@ -65,40 +65,28 @@ class TestExternalTokenProvider:
     def test_validate_token_success(self):
         """Test successful token validation."""
         token = "ya29.valid_token_12345"
-        mock_user_info = {"email": "test@example.com", "id": "123456"}
-        
-        with patch('auth.external_token_provider.build') as mock_build:
-            mock_service = Mock()
-            mock_service.userinfo().get().execute.return_value = mock_user_info
-            mock_build.return_value = mock_service
-            
+        response = Mock(status_code=200)
+        response.json.return_value = {"email": "test@example.com", "sub": "123456"}
+
+        with patch("requests.get", return_value=response):
             provider = ExternalTokenProvider(access_token=token, validate=False)
             result = provider.validate_token()
-            
+
             assert result is True
-            assert provider.user_info == mock_user_info
-    
+            assert provider.user_info == {"email": "test@example.com", "id": "123456"}
+
     def test_validate_token_http_error(self):
         """Test token validation with HTTP error."""
-        from googleapiclient.errors import HttpError
-        
         token = "ya29.expired_token"
-        
-        with patch('auth.external_token_provider.build') as mock_build:
-            mock_service = Mock()
-            mock_error = HttpError(
-                resp=Mock(status=401),
-                content=b'{"error": "invalid_token"}'
-            )
-            mock_service.userinfo().get().execute.side_effect = mock_error
-            mock_build.return_value = mock_service
-            
+        response = Mock(status_code=401, text='{"error": "invalid_token"}')
+
+        with patch("requests.get", return_value=response):
             provider = ExternalTokenProvider(access_token=token, validate=False)
             result = provider.validate_token()
-            
+
             assert result is False
             assert provider.user_info is None
-    
+
     def test_validate_token_generic_exception(self):
         """Test token validation with generic exception."""
         token = "ya29.test_token"
@@ -128,19 +116,16 @@ class TestExternalTokenProvider:
     def test_get_user_info_fetch_on_demand(self):
         """Test that get_user_info fetches user info if not cached."""
         token = "ya29.test_token"
-        mock_user_info = {"email": "test@example.com", "id": "123456"}
-        
-        with patch('auth.external_token_provider.build') as mock_build:
-            mock_service = Mock()
-            mock_service.userinfo().get().execute.return_value = mock_user_info
-            mock_build.return_value = mock_service
-            
+        response = Mock(status_code=200)
+        response.json.return_value = {"email": "test@example.com", "sub": "123456"}
+
+        with patch("requests.get", return_value=response):
             provider = ExternalTokenProvider(access_token=token, validate=False)
             result = provider.get_user_info()
-            
-            assert result == mock_user_info
-            assert provider.user_info == mock_user_info
-    
+
+            assert result == {"email": "test@example.com", "id": "123456"}
+            assert provider.user_info == result
+
     def test_get_default_scopes_includes_all_services(self):
         """Test that default scopes include all Google Workspace services."""
         token = "ya29.test_token"
@@ -251,3 +236,75 @@ class TestExternalTokenProviderIntegration:
         assert 'email' in user_info
         assert '@' in user_info['email']
 
+
+class TestBearerTokenUserEmail:
+    """The bearer token's account stands in for the user_google_email argument."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        from auth import external_token_provider
+
+        external_token_provider._bearer_email_cache.clear()
+        monkeypatch.setenv("GOOGLE_BEARER_TOKEN", "ya29.test_token")
+        yield
+        external_token_provider._bearer_email_cache.clear()
+
+    @staticmethod
+    def _response(status, payload=None):
+        response = Mock(status_code=status)
+        response.json.return_value = payload or {}
+        return response
+
+    def test_mode_flag(self, monkeypatch):
+        from auth.external_token_provider import is_bearer_token_mode
+
+        monkeypatch.delenv("MCP_BEARER_TOKEN_MODE", raising=False)
+        assert is_bearer_token_mode() is False
+        monkeypatch.setenv("MCP_BEARER_TOKEN_MODE", "1")
+        assert is_bearer_token_mode() is True
+
+    def test_email_from_tokeninfo_is_cached(self):
+        from auth.external_token_provider import get_bearer_token_user_email
+
+        with patch("requests.post", return_value=self._response(200, {"email": "a@example.com"})) as post, \
+                patch("requests.get") as get:
+            assert get_bearer_token_user_email() == "a@example.com"
+            assert get_bearer_token_user_email() == "a@example.com"
+        assert post.call_count == 1
+        assert get.call_count == 0
+
+    def test_falls_back_to_gmail_then_drive(self):
+        from auth.external_token_provider import get_bearer_token_user_email
+
+        def get(url, **_):
+            if "gmail" in url:
+                return self._response(403)
+            return self._response(200, {"user": {"emailAddress": "d@example.com"}})
+
+        # tokeninfo answers but the token carries no email scope.
+        with patch("requests.post", return_value=self._response(200, {"scope": "drive"})), \
+                patch("requests.get", side_effect=get):
+            assert get_bearer_token_user_email() == "d@example.com"
+
+    def test_no_address_raises(self):
+        from auth.external_token_provider import get_bearer_token_user_email
+
+        with patch("requests.post", return_value=self._response(400)), \
+                patch("requests.get", return_value=self._response(401)):
+            with pytest.raises(ValueError, match="Could not determine"):
+                get_bearer_token_user_email()
+
+    def test_no_token_raises(self, monkeypatch):
+        from auth.external_token_provider import get_bearer_token_user_email
+
+        monkeypatch.delenv("GOOGLE_BEARER_TOKEN")
+        with pytest.raises(ValueError, match="GOOGLE_BEARER_TOKEN"):
+            get_bearer_token_user_email()
+
+    def test_managed_email_comes_from_the_token(self, monkeypatch):
+        from auth import service_decorator
+
+        monkeypatch.setenv("MCP_BEARER_TOKEN_MODE", "1")
+        monkeypatch.setattr(service_decorator, "get_bearer_token_user_email", lambda: "a@example.com")
+        assert service_decorator._user_email_is_managed() is True
+        assert service_decorator._extract_managed_user_email(None, None, "tool") == "a@example.com"
